@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+
+# Course lecture PDFs are reference material, not project source.
+Lecture/
+
+# MATLAB autosave / temporary files
+*.asv
+*.m~
+
+# OS metadata
+Thumbs.db
+.DS_Store
