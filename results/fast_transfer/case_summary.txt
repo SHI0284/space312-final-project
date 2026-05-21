@@ -1,0 +1,11 @@
+Case: fast_transfer
+Method: Lambert
+Direction/detail: Prograde
+TOF_days: 1.0000000000
+dV1_km_s: 2.0978306675
+dV2_km_s: 0.9983726035
+dVtotal_km_s: 3.0962032709
+FinalPositionError_km: 0.0000000000e+00
+nRev: NaN
+aPhase_km: NaN
+rpPhase_km: NaN
