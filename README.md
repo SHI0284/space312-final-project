@@ -1,6 +1,9 @@
 # SPACE312 Final Project
 
 GTO-to-GEO transfer trajectory optimization for the GEO-KOMPSAT-2A target state.
+The submitted workflow is based on course concepts: two-body propagation,
+Lambert transfer, impulsive Delta V, ECI/ECEF/SEZ visibility, and Pareto
+tradeoff evaluation.
 
 ## Final design choice
 

@@ -8,16 +8,17 @@ format longG;
 % This script is intentionally self-contained. It uses only standard MATLAB
 % functions and local functions included at the end of this file.
 %
-% Main strategy:
-%   1) Dense two-impulse Lambert sweep over transfer duration.
-%   2) Pareto filtering in [sum dV, transfer time].
-%   3) Optional direct-shooting refinement of selected Pareto points.
-%   4) Required figures, result table, visibility intervals, and GIF animation.
+% Main submitted strategy, aligned with the lecture material:
+%   1) Two-body propagation for GTO and GEO states.
+%   2) Two-impulse Lambert transfer over a dense transfer-time grid.
+%   3) Maneuver cost from vector Delta V at departure and arrival.
+%   4) Pareto filtering in [sum dV, transfer time].
+%   5) ECI/ECEF/SEZ visibility calculation and required figures.
 %
 % Units: km, s, km/s, rad unless stated otherwise.
 
 %% User switches
-runShootingRefinement = false;    % Set true for optional slow direct-shooting refinement.
+runShootingRefinement = false;    % Not used for the submitted result; kept only as a diagnostic option.
 makeAnimation = true;             % Writes a GIF in the results folder.
 targetStateMode = "PDF_GIVEN";     % "PDF_GIVEN" or "CONSISTENT_GEO_FROM_ERA"
 resultsDir = fullfile(pwd,'results');
@@ -110,11 +111,9 @@ else
         abs(norm(RGEO0) - norm(R0)));
 end
 
-%% Optional direct-shooting refinement
-% This step is included because long-duration rendezvous can hide useful
-% multi-revolution/phasing solutions that a simple zero-revolution Lambert
-% sweep may miss. The optimizer minimizes dV plus a large terminal-position
-% penalty, using only fminsearch.
+%% Optional diagnostic direct-shooting refinement
+% This block is intentionally disabled for the submitted result. The final
+% report uses the lecture-based Lambert sweep and Pareto filtering above.
 if runShootingRefinement && ~isempty(records)
     fprintf('Refining selected Pareto and grid candidates with direct shooting...\n');
     seedIdx = chooseRefinementSeeds(records,30);

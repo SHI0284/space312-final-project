@@ -91,13 +91,14 @@ def add_toc(doc):
     for item in [
         "1. 요약",
         "2. 과제 조건과 목표 상태 해석",
-        "3. Mission priority 설정",
-        "4. 최적화 문제와 Pareto 평가",
-        "5. 탐색 방법 및 코드 구성",
-        "6. Pareto 결과와 knee point 판단",
-        "7. 최종 대표 설계점",
-        "8. 궤적, 오차, 가시성 결과",
-        "9. 결론",
+        "3. 수업 내용과의 연결",
+        "4. Mission priority 설정",
+        "5. 최적화 문제와 Pareto 평가",
+        "6. 탐색 방법 및 코드 구성",
+        "7. Pareto 결과와 knee point 판단",
+        "8. 최종 대표 설계점",
+        "9. 궤적, 오차, 가시성 결과",
+        "10. 결론",
         "Appendix A. MATLAB 구현 요약",
     ]:
         p = doc.add_paragraph()
@@ -162,7 +163,31 @@ def build():
         "target state이다. 따라서 코드에는 PDF_GIVEN 모드를 기본값으로 두어 Section 3.2의 수치를 그대로 사용하였다."
     )
 
-    add_heading(doc, "3. Mission priority 설정", 1)
+    add_heading(doc, "3. 수업 내용과의 연결", 1)
+    add_body(
+        doc,
+        "본 설계는 수업에서 다룬 개념을 조합해서 구성하였다. 따라서 최종 결과는 임의의 black-box optimizer가 아니라, "
+        "강의에서 배운 궤도역학 절차를 코드로 반복 적용한 결과이다. 사용한 핵심 개념은 다음과 같다."
+    )
+    add_key_value_table(
+        doc,
+        [
+            ("Two-body equation", "지구 중심 2체 문제로 GTO와 GEO state를 전파"),
+            ("Impulsive maneuver", "출발과 도착에서 속도 벡터 차이로 Delta V 계산"),
+            ("Lambert problem", "주어진 r1, r2, Delta t에 대해 transfer velocity 계산"),
+            ("Inclination/plane change idea", "초기 GTO의 z방향 속도와 GEO의 equatorial 조건이 Delta V에 반영됨"),
+            ("ECI to ECEF and SEZ", "KHU 지상국 기준 elevation과 visibility interval 계산"),
+            ("Pork-chop/Pareto idea", "transfer time을 sweep하여 Delta V와 시간의 tradeoff를 비교"),
+        ],
+    )
+    add_body(
+        doc,
+        "즉, 본 과제의 계산 흐름은 '시간을 하나 정한다 -> 해당 시각의 GEO 목표 state를 구한다 -> Lambert 문제를 푼다 -> "
+        "두 번의 impulsive Delta V를 계산한다 -> 여러 시간 후보 중 Pareto 후보를 남긴다'이다. 이 방식은 수업에서 배운 "
+        "Lambert transfer와 pork-chop 형태의 trade-space 탐색을 그대로 과제 조건에 적용한 것이다."
+    )
+
+    add_heading(doc, "4. Mission priority 설정", 1)
     add_body(
         doc,
         "GTO에서 GEO로 가는 임무에서는 연료 소모가 작을수록 좋지만, transfer 시간이 불필요하게 길어지면 위성 운용 시작이 늦어지고 "
@@ -183,7 +208,7 @@ def build():
         "점점 작아지는 지점을 찾고, 그 지점을 대표 설계점으로 선택하는 것이 임무 관점에서 더 설득력 있다."
     )
 
-    add_heading(doc, "4. 최적화 문제와 Pareto 평가", 1)
+    add_heading(doc, "5. 최적화 문제와 Pareto 평가", 1)
     add_body(
         doc,
         "각 후보해의 목적함수는 F = [total Delta V, transfer duration]으로 두었다. 한 후보해가 Pareto-optimal이라는 것은 "
@@ -200,11 +225,17 @@ def build():
         ],
     )
 
-    add_heading(doc, "5. 탐색 방법 및 코드 구성", 1)
+    add_heading(doc, "6. 탐색 방법 및 코드 구성", 1)
     add_body(
         doc,
         "코드는 1일에서 30일까지의 transfer duration을 조밀하게 sweep하며 Lambert problem을 풀었다. 각 시간에 대해 목표 GEO state를 "
         "전파하고, 초기 GTO 위치에서 해당 목표 위치까지 연결하는 Lambert velocity를 구한 뒤 두 번의 impulsive maneuver 크기를 계산하였다."
+    )
+    add_body(
+        doc,
+        "중요한 점은 제출 결과가 MATLAB의 black-box 최적화 함수로 만들어진 것이 아니라는 점이다. 코드에는 검산용 direct-shooting 옵션이 "
+        "남아 있지만 기본값은 false이며, 본 보고서의 표와 그림은 Lambert sweep 결과와 Pareto filtering만으로 생성하였다. 따라서 결과 해석은 "
+        "수업에서 배운 Lambert transfer, two-body propagation, impulsive Delta V 계산에 기반한다."
     )
     add_body(
         doc,
@@ -213,7 +244,7 @@ def build():
         "조건을 우선하고, same-point phasing 후보는 해당 반경 조건이 맞을 때만 추가되도록 제한하였다."
     )
 
-    add_heading(doc, "6. Pareto 결과와 knee point 판단", 1)
+    add_heading(doc, "7. Pareto 결과와 knee point 판단", 1)
     add_body(
         doc,
         "교수님 답변처럼 transfer 구성 방식에 따라 Pareto curve가 급격히 꺾이거나 설계 변수 변화에 따른 결과가 가파르게 나타날 수 있다. "
@@ -228,7 +259,7 @@ def build():
         width=6.2,
     )
 
-    add_heading(doc, "7. 최종 대표 설계점", 1)
+    add_heading(doc, "8. 최종 대표 설계점", 1)
     add_body(
         doc,
         "최종 대표 설계점은 1.2000 days transfer이다. 이 해는 fastest 1-day case에 비해 transfer time을 0.2 days만 늘리면서 "
@@ -255,7 +286,7 @@ def build():
         ],
     )
 
-    add_heading(doc, "8. 궤적, 오차, 가시성 결과", 1)
+    add_heading(doc, "9. 궤적, 오차, 가시성 결과", 1)
     add_body(
         doc,
         "선택한 궤적은 두 체 문제 전파와 Lambert boundary condition을 통해 최종 위치가 목표 위치에 도달하도록 구성되었다. "
@@ -272,7 +303,7 @@ def build():
     )
     add_figure(doc, "KHU_Visibility.png", "Figure 6. Visibility interval from Kyung Hee University ground station.", width=5.8)
 
-    add_heading(doc, "9. 결론", 1)
+    add_heading(doc, "10. 결론", 1)
     add_body(
         doc,
         "본 설계는 과제 안내 PDF의 Section 3.2 target state vector를 기준 조건으로 사용하고, mission priority를 먼저 정의한 뒤 "
@@ -292,6 +323,7 @@ def build():
         [
             "SPACE312_Final_Project_Main.m: main script, constants, target state mode, Lambert sweep, Pareto filtering, report solution selection",
             "targetStateMode = PDF_GIVEN: project PDF Section 3.2 target state vector를 그대로 사용",
+            "runShootingRefinement = false: 제출 결과는 optimizer가 아니라 수업 기반 Lambert sweep으로 생성",
             "chooseBalancedKneeIndex: normalized Pareto front에서 knee point를 선택",
             "results/FinalProject_ParetoResults.csv: 전체 Pareto 후보 저장",
             "results/FinalProject_ReportSolutions.csv: 보고서용 대표 후보 저장",
