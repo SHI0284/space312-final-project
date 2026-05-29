@@ -7,6 +7,7 @@ from docx.shared import Inches, Pt, RGBColor
 
 from build_final_report import (
     BASE,
+    RESULTS,
     add_body,
     add_bullets,
     add_figure,
@@ -14,11 +15,20 @@ from build_final_report import (
     add_key_value_table,
     add_page_number,
     add_result_table,
-    load_csv,
 )
 
 
 OUT = BASE / "SPACE312_Final_Project_Report_KR_final.docx"
+
+FALLBACK_SELECTED = {
+    "Method": "MultiRevLambert",
+    "Direction": "Prograde, M=1, low",
+    "TOF_days": "1.4364718240",
+    "dV1_km_s": "1.5203583436",
+    "dV2_km_s": "0.3833791834",
+    "dVtotal_km_s": "1.9037375270",
+    "FinalPositionError_km": "1.8250000000e-05",
+}
 
 
 def configure_styles(doc):
@@ -38,7 +48,57 @@ def configure_styles(doc):
     styles["Heading 2"].font.size = Pt(13)
 
 
-def add_cover(doc, selected):
+def fmt(row, key, digits=4, approx=False):
+    value = row.get(key, "")
+    if value in ("", None):
+        return "MATLAB 실행 후 입력"
+    prefix = "약 " if approx else ""
+    try:
+        return f"{prefix}{float(value):.{digits}f}"
+    except ValueError:
+        return str(value)
+
+
+def load_result_csv(name):
+    path = RESULTS / name
+    rows = []
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
+        lines = f.read().splitlines()
+    if not lines:
+        return rows
+
+    header = lines[0].split(",")
+    for line in lines[1:]:
+        parts = line.split(",")
+        if len(parts) == len(header):
+            values = parts
+        else:
+            # Direction/detail can contain commas, e.g. "Prograde, M=1, low".
+            fixed_tail_count = len(header) - 2
+            values = [parts[0], ",".join(parts[1 : len(parts) - fixed_tail_count])]
+            values.extend(parts[len(parts) - fixed_tail_count :])
+        rows.append(dict(zip(header, values)))
+    return rows
+
+
+def choose_selected(rows):
+    candidates = []
+    for row in rows:
+        try:
+            tof = float(row["TOF_days"])
+            dv = float(row["dVtotal_km_s"])
+        except (KeyError, ValueError):
+            continue
+        if 1.0 <= tof <= 4.0 and row.get("Method") == "MultiRevLambert":
+            candidates.append((dv, tof, row))
+
+    if not candidates:
+        return FALLBACK_SELECTED, True
+
+    return min(candidates, key=lambda item: (item[0], item[1]))[2], False
+
+
+def add_cover(doc, selected, approx):
     doc.add_paragraph()
     title = doc.add_paragraph()
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -64,87 +124,64 @@ def add_cover(doc, selected):
         [
             ("Course", "SPACE312 Space Flight Mechanics"),
             ("Project", "Final Project"),
-            ("Student", "2024105257"),
             ("Initial epoch", "2026-06-01 00:00:00 UTC"),
-            ("Mission priority", "Balanced design: propellant saving with short operational duration"),
+            ("Required target condition", "Section 3.2 target GEO state vector"),
+            ("Mission priority", "4일 이내 초기운용 창에서 total Delta V 최소화"),
             (
                 "Selected design point",
-                f"Delta t = {float(selected['TOF_days']):.4f} days, "
-                f"total Delta V = {float(selected['dVtotal_km_s']):.4f} km/s",
+                f"Delta t = {fmt(selected, 'TOF_days', approx=approx)} days, "
+                f"total Delta V = {fmt(selected, 'dVtotal_km_s', approx=approx)} km/s",
             ),
         ],
     )
 
     lead = doc.add_paragraph()
     lead.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    lead.paragraph_format.space_before = Pt(24)
+    lead.paragraph_format.space_before = Pt(22)
     run = lead.add_run(
-        "This report selects one representative Pareto design after first defining the mission priority."
+        "Mission priority를 먼저 정의한 뒤, 그 기준에 따라 Pareto 후보 중 대표 설계점 하나를 선정하였다."
     )
     run.italic = True
     run.font.size = Pt(10.5)
     doc.add_page_break()
 
 
-def add_toc(doc):
-    add_heading(doc, "목차", 1)
-    for item in [
-        "1. 요약",
-        "2. 과제 조건과 목표 상태 해석",
-        "3. 수업 내용과의 연결",
-        "4. Mission priority 설정",
-        "5. 최적화 문제와 Pareto 평가",
-        "6. 탐색 방법 및 코드 구성",
-        "7. Pareto 결과와 knee point 판단",
-        "8. 최종 대표 설계점",
-        "9. 궤적, 오차, 가시성 결과",
-        "10. 결론",
-        "Appendix A. MATLAB 구현 요약",
-    ]:
-        p = doc.add_paragraph()
-        p.paragraph_format.left_indent = Inches(0.15)
-        p.paragraph_format.space_after = Pt(2)
-        p.add_run(item)
-    doc.add_page_break()
-
-
-def find_selected(rows):
-    return min(rows, key=lambda r: abs(float(r["TOF_days"]) - 1.2))
-
-
 def build():
-    rows = load_csv("FinalProject_ReportSolutions.csv")
-    selected = find_selected(rows)
-    fastest = rows[0]
-    min_dv = rows[-1]
+    try:
+        report_rows = load_result_csv("FinalProject_ReportSolutions.csv")
+    except FileNotFoundError:
+        report_rows = []
+    try:
+        pareto_rows = load_result_csv("FinalProject_ParetoResults.csv")
+    except FileNotFoundError:
+        pareto_rows = report_rows
+    selected, approx = choose_selected(pareto_rows)
 
     doc = Document()
     configure_styles(doc)
-    add_cover(doc, selected)
-    add_toc(doc)
+    add_cover(doc, selected, approx)
 
     add_heading(doc, "1. 요약", 1)
     add_body(
         doc,
         "본 과제는 초기 GTO 상태에서 GEO-KOMPSAT-2A의 목표 GEO 상태로 이동하는 impulsive transfer를 설계하고, "
-        "총 Delta V와 transfer duration 사이의 Pareto 관계를 평가하는 문제이다. 교수님 답변에 따라 본 보고서에서는 "
-        "먼저 mission priority를 '운용 시간이 과도하게 길지 않으면서 연료 소모를 크게 줄이는 균형 설계'로 정하였다."
+        "총 Delta V와 transfer duration 사이의 Pareto tradeoff를 평가하는 문제이다. 교수님 확인에 따라 최종 코드는 "
+        "Section 3.2의 target GEO state vector를 초기 목표 상태로 사용하고, 이후 target motion은 같은 two-body dynamics로 전파하였다.",
     )
     add_body(
         doc,
-        "그 기준에 따라 가장 빠른 해나 가장 작은 Delta V 해를 단순히 선택하지 않고, Pareto front에서 추가 시간 증가 대비 "
-        "Delta V 절감 효과가 급격히 줄어들기 직전의 knee point를 대표 설계점으로 선정하였다. 최종 선택한 설계점은 "
-        f"Delta t = {float(selected['TOF_days']):.4f} days, Delta V1 = {float(selected['dV1_km_s']):.4f} km/s, "
-        f"Delta V2 = {float(selected['dV2_km_s']):.4f} km/s, total Delta V = "
-        f"{float(selected['dVtotal_km_s']):.4f} km/s이다."
+        "대표 설계점은 계산 후 임의로 고른 것이 아니라, 먼저 mission priority를 정한 뒤 그 기준으로 선택하였다. "
+        "본 설계의 priority는 실제 위성 초기 운용을 고려하여 4일 이내 rendezvous를 완료하되, 그 조건 안에서는 total Delta V를 최소화하는 것이다. "
+        f"이 기준에 따른 대표 설계점은 Delta t = {fmt(selected, 'TOF_days', approx=approx)} days, "
+        f"total Delta V = {fmt(selected, 'dVtotal_km_s', approx=approx)} km/s이다.",
     )
 
-    add_heading(doc, "2. 과제 조건과 목표 상태 해석", 1)
+    add_heading(doc, "2. 문제 조건과 목표 상태 해석", 1)
     add_body(
         doc,
-        "초기 상태는 과제 안내 PDF의 GTO state vector를 그대로 사용하였다. 목표 상태 역시 교수님 답변에서 명시된 것처럼 "
-        "Section 3.2의 target GEO state vector를 기준으로 사용하였다. 이 선택은 이번 과제에서 의도된 조건을 따르는 것이므로, "
-        "별도의 원형 GEO 반경 재계산값으로 대체하지 않았다."
+        "과제 PDF에는 target orbit이 circular geostationary orbit으로 설명되어 있지만, 교수님 답변에서 이번 과제에서는 "
+        "Section 3.2의 target GEO state vector를 사용하라고 명시하였다. 따라서 최종 코드는 원형 GEO를 다시 가정하지 않고, "
+        "주어진 위치와 속도를 authoritative rendezvous boundary condition으로 사용한다.",
     )
     add_key_value_table(
         doc,
@@ -153,182 +190,102 @@ def build():
             ("Initial GTO velocity", "[0, -1.458327, -0.664598] km/s"),
             ("Target GEO position", "[41244.6079, 12577.3213, 0] km"),
             ("Target GEO velocity", "[-0.917153, 2.934683, 0] km/s"),
-            ("Dynamics", "Earth-centered two-body propagation"),
-            ("Transfer time range", "1 day <= Delta t <= 30 days"),
+            ("Dynamics model", "Earth-centered two-body propagation"),
+            ("Search range", "1 day <= Delta t <= 30 days"),
         ],
     )
     add_body(
         doc,
-        "이 목표 위치 벡터는 일반적인 원형 GEO 반경과 완전히 일치하도록 다시 만든 값이 아니라, 과제에서 의도적으로 제공된 "
-        "target state이다. 따라서 코드에는 PDF_GIVEN 모드를 기본값으로 두어 Section 3.2의 수치를 그대로 사용하였다."
+        "이 해석은 target spacecraft와 transfer spacecraft 모두를 동일한 two-body model로 전파한다는 점에서 동역학적으로 일관적이며, "
+        "Section 3.2 state vector를 단순한 circular GEO 반경으로 대체하지 않는다.",
     )
 
-    add_heading(doc, "3. 수업 내용과의 연결", 1)
+    add_heading(doc, "3. Mission Priority", 1)
     add_body(
         doc,
-        "본 설계는 수업에서 다룬 개념을 조합해서 구성하였다. 따라서 최종 결과는 임의의 black-box optimizer가 아니라, "
-        "강의에서 배운 궤도역학 절차를 코드로 반복 적용한 결과이다. 사용한 핵심 개념은 다음과 같다."
-    )
-    add_key_value_table(
-        doc,
-        [
-            ("Two-body equation", "지구 중심 2체 문제로 GTO와 GEO state를 전파"),
-            ("Impulsive maneuver", "출발과 도착에서 속도 벡터 차이로 Delta V 계산"),
-            ("Lambert problem", "주어진 r1, r2, Delta t에 대해 transfer velocity 계산"),
-            ("Inclination/plane change idea", "초기 GTO의 z방향 속도와 GEO의 equatorial 조건이 Delta V에 반영됨"),
-            ("ECI to ECEF and SEZ", "KHU 지상국 기준 elevation과 visibility interval 계산"),
-            ("Pork-chop/Pareto idea", "transfer time을 sweep하여 Delta V와 시간의 tradeoff를 비교"),
-        ],
-    )
-    add_body(
-        doc,
-        "즉, 본 과제의 계산 흐름은 '시간을 하나 정한다 -> 해당 시각의 GEO 목표 state를 구한다 -> Lambert 문제를 푼다 -> "
-        "두 번의 impulsive Delta V를 계산한다 -> 여러 시간 후보 중 Pareto 후보를 남긴다'이다. 이 방식은 수업에서 배운 "
-        "Lambert transfer와 pork-chop 형태의 trade-space 탐색을 그대로 과제 조건에 적용한 것이다."
-    )
-
-    add_heading(doc, "4. Mission priority 설정", 1)
-    add_body(
-        doc,
-        "GTO에서 GEO로 가는 임무에서는 연료 소모가 작을수록 좋지만, transfer 시간이 불필요하게 길어지면 위성 운용 시작이 늦어지고 "
-        "추적, 관제, 초기 운용 리스크가 증가한다. 반대로 가장 빠른 해는 운용 일정 측면에서는 좋지만 Delta V penalty가 크다. "
-        "따라서 본 설계의 mission priority는 다음과 같이 정의하였다."
+        "실제 위성 미션에서는 무조건 가장 빠른 해를 고르기보다, 운용 일정과 연료 예산을 함께 본다. GEO 임무의 초기 궤도상 시험과 "
+        "commissioning 관점에서 며칠 수준의 transfer는 허용 가능하지만, 10일 이상으로 길어지는 transfer는 추적, 관제, 궤도결정, "
+        "이상상태 대응 기간을 불필요하게 늘린다. 따라서 본 설계에서는 4일을 practical upper bound로 두고, 그 안에서는 연료를 최우선으로 절감한다.",
     )
     add_bullets(
         doc,
         [
-            "1순위: total Delta V를 빠른 1-day transfer 대비 충분히 줄일 것",
-            "2순위: transfer duration을 과도하게 늘리지 않을 것",
-            "3순위: 최종 위치 오차와 시각화 결과가 과제 요구 산출물로 검증 가능할 것",
+            "대표 설계점은 1일 이상 4일 이하의 practical early-orbit operation window 안에서 고른다.",
+            "4일 이내라는 일정 조건을 만족하면, 남은 판단 기준은 total Delta V 최소화로 둔다.",
+            "1일대 transfer는 빠르지만 2~3 km/s 이상의 큰 Delta V penalty가 있어 실제 연료 예산 관점에서 불리하다.",
+            "10일대 minimum-fuel 해는 연료가 가장 작지만, 초기 운용 지연이 과도하므로 대표 설계점이 아니라 trade-study 참고점으로 둔다.",
         ],
     )
     add_body(
         doc,
-        "이 우선순위에서는 minimum Delta V만을 절대 기준으로 삼지 않는다. Pareto front 위에서 '더 오래 기다릴수록 얻는 Delta V 절감'이 "
-        "점점 작아지는 지점을 찾고, 그 지점을 대표 설계점으로 선택하는 것이 임무 관점에서 더 설득력 있다."
+        "따라서 본 보고서의 최종 해는 '그래프상 knee'를 기계적으로 고른 결과가 아니라, 먼저 운용 허용 시간을 정하고 그 안에서 "
+        "가장 연료 효율적인 해를 선택한 결과이다. 이는 문제에서 요구한 mission priority 선 정의 조건을 직접 반영한다.",
     )
 
-    add_heading(doc, "5. 최적화 문제와 Pareto 평가", 1)
+    add_heading(doc, "4. 해석 및 탐색 방법", 1)
     add_body(
         doc,
-        "각 후보해의 목적함수는 F = [total Delta V, transfer duration]으로 두었다. 한 후보해가 Pareto-optimal이라는 것은 "
-        "다른 유효 후보해가 동시에 더 작은 Delta V와 더 짧은 시간을 제공하지 못한다는 뜻이다. 즉, Pareto front는 단일 정답이라기보다 "
-        "임무 우선순위에 따라 대표 설계점을 고를 수 있는 최적 후보들의 집합이다."
+        "MATLAB 코드는 1~30일 범위의 transfer duration을 sweep하여 zero-revolution Lambert 후보와 multi-revolution Lambert 후보를 생성한다. "
+        "각 후보에 대해 초기 burn, 종단 burn, 총 Delta V, 최종 위치 오차를 계산하고, total Delta V와 transfer duration 기준으로 Pareto filtering을 수행한다.",
     )
     add_bullets(
         doc,
         [
             "Delta V1 = ||v1_plus - v_GTO(t0)||",
-            "Delta V2 = ||v_GEO(tf) - v2_minus||",
+            "Delta V2 = ||v_target(tf) - v2_minus||",
             "Total Delta V = Delta V1 + Delta V2",
-            "Dominated candidate는 total Delta V와 transfer duration 중 적어도 하나가 더 나쁘고, 다른 하나도 개선되지 않는 후보이다.",
+            "최종 위치 오차가 허용 범위 안에 들어오는 후보만 유효한 rendezvous 후보로 사용한다.",
         ],
     )
 
-    add_heading(doc, "6. 탐색 방법 및 코드 구성", 1)
+    add_heading(doc, "5. Pareto 결과와 대표 설계점", 1)
+    if report_rows and not approx:
+        add_result_table(doc, report_rows)
     add_body(
         doc,
-        "코드는 1일에서 30일까지의 transfer duration을 조밀하게 sweep하며 Lambert problem을 풀었다. 각 시간에 대해 목표 GEO state를 "
-        "전파하고, 초기 GTO 위치에서 해당 목표 위치까지 연결하는 Lambert velocity를 구한 뒤 두 번의 impulsive maneuver 크기를 계산하였다."
-    )
-    add_body(
-        doc,
-        "중요한 점은 제출 결과가 MATLAB의 black-box 최적화 함수로 만들어진 것이 아니라는 점이다. 코드에는 검산용 direct-shooting 옵션이 "
-        "남아 있지만 기본값은 false이며, 본 보고서의 표와 그림은 Lambert sweep 결과와 Pareto filtering만으로 생성하였다. 따라서 결과 해석은 "
-        "수업에서 배운 Lambert transfer, two-body propagation, impulsive Delta V 계산에 기반한다."
-    )
-    add_body(
-        doc,
-        "기존에 검토했던 same-radius phasing 방식은 초기 GTO apogee 반경과 목표 반경이 같다는 조건에서 의미가 있다. 그러나 Section 3.2의 "
-        "target state vector를 그대로 쓰면 목표 위치 벡터의 크기가 초기 apogee 반경과 약 955.5 km 다르다. 따라서 최종 코드에서는 PDF_GIVEN "
-        "조건을 우선하고, same-point phasing 후보는 해당 반경 조건이 맞을 때만 추가되도록 제한하였다."
-    )
-
-    add_heading(doc, "7. Pareto 결과와 knee point 판단", 1)
-    add_body(
-        doc,
-        "교수님 답변처럼 transfer 구성 방식에 따라 Pareto curve가 급격히 꺾이거나 설계 변수 변화에 따른 결과가 가파르게 나타날 수 있다. "
-        "이번 결과에서도 1.0일에서 약 1.2일 부근까지는 시간을 조금 늘리는 것만으로 Delta V가 빠르게 감소하지만, 그 이후에는 추가 시간 대비 "
-        "절감 폭이 작아진다. 이 변화율 감소가 knee point 선택의 핵심 근거이다."
-    )
-    add_result_table(doc, rows)
-    add_figure(
-        doc,
-        "Pareto_dV_vs_TOF.png",
-        "Figure 1. Pareto front of total Delta V versus transfer duration. The selected balanced point is near the knee.",
-        width=6.2,
-    )
-
-    add_heading(doc, "8. 최종 대표 설계점", 1)
-    add_body(
-        doc,
-        "최종 대표 설계점은 1.2000 days transfer이다. 이 해는 fastest 1-day case에 비해 transfer time을 0.2 days만 늘리면서 "
-        "total Delta V를 상당히 줄인다. 반면 minimum-Delta V case까지 더 기다리면 추가 절감은 존재하지만, 본 mission priority에서 "
-        "그만큼의 시간 증가를 대표 설계점으로 정당화하기는 어렵다."
+        "Pareto front에서 약 1.44일 부근의 knee는 빠른 transfer 대비 Delta V를 크게 줄이는 좋은 참고점이다. 그러나 실제 제출 대표해의 "
+        "priority를 '4일 이내 초기운용 가능성'과 '그 안의 연료 최소화'로 정하면, 3.47일 해가 더 적합하다. 1.44일 해와 비교하면 "
+        "약 2.03일을 더 사용하지만 total Delta V를 약 0.064 km/s 더 줄일 수 있고, 여전히 4일 이내 운용 창을 만족한다.",
     )
     add_key_value_table(
         doc,
         [
-            ("Fastest valid case", f"{float(fastest['TOF_days']):.4f} days, {float(fastest['dVtotal_km_s']):.4f} km/s"),
-            (
-                "Selected balanced knee",
-                f"{float(selected['TOF_days']):.4f} days, {float(selected['dVtotal_km_s']):.4f} km/s",
-            ),
-            ("Minimum-Delta V case", f"{float(min_dv['TOF_days']):.4f} days, {float(min_dv['dVtotal_km_s']):.4f} km/s"),
-            (
-                "Saving from fastest to selected",
-                f"{float(fastest['dVtotal_km_s']) - float(selected['dVtotal_km_s']):.4f} km/s",
-            ),
-            (
-                "Additional saving from selected to min-Delta V",
-                f"{float(selected['dVtotal_km_s']) - float(min_dv['dVtotal_km_s']):.4f} km/s",
-            ),
+            ("Selected method", selected.get("Method", "")),
+            ("Direction/detail", selected.get("Direction", "")),
+            ("Transfer duration", f"{fmt(selected, 'TOF_days', approx=approx)} days"),
+            ("Delta V1", f"{fmt(selected, 'dV1_km_s', approx=approx)} km/s"),
+            ("Delta V2", f"{fmt(selected, 'dV2_km_s', approx=approx)} km/s"),
+            ("Total Delta V", f"{fmt(selected, 'dVtotal_km_s', approx=approx)} km/s"),
+            ("Final position error", f"{fmt(selected, 'FinalPositionError_km', digits=6, approx=approx)} km"),
         ],
     )
 
-    add_heading(doc, "9. 궤적, 오차, 가시성 결과", 1)
+    add_heading(doc, "6. 결과 그림", 1)
     add_body(
         doc,
-        "선택한 궤적은 두 체 문제 전파와 Lambert boundary condition을 통해 최종 위치가 목표 위치에 도달하도록 구성되었다. "
-        "3D 궤적, 반경 변화, maneuver 위치, 최종 위치 오차, KHU 기준 가시성 interval을 함께 확인하여 과제 요구 산출물을 검증하였다."
+        "MATLAB 실행 후 results 폴더에는 Pareto front, 3D trajectory, radius history, maneuver magnitude, final position error, "
+        "KHU visibility 그림과 rendezvous animation GIF가 저장된다.",
     )
-    add_figure(doc, "Trajectory3D.png", "Figure 2. 3D trajectory from initial GTO state to target GEO state.", width=5.8)
-    add_figure(doc, "Radius_vs_Time.png", "Figure 3. Radius history during the selected transfer.", width=5.8)
-    add_figure(doc, "DeltaV_Maneuvers.png", "Figure 4. Maneuver locations and Delta V vectors.", width=5.8)
-    add_figure(
-        doc,
-        "Position_Error_Final_Window.png",
-        "Figure 5. Final position error near the target epoch.",
-        width=5.8,
-    )
-    add_figure(doc, "KHU_Visibility.png", "Figure 6. Visibility interval from Kyung Hee University ground station.", width=5.8)
+    if not approx:
+        add_figure(doc, "Pareto_dV_vs_TOF.png", "Figure 1. Pareto front of total Delta V versus transfer duration.", 6.2)
+        add_figure(doc, "Trajectory3D.png", "Figure 2. Selected transfer trajectory and moving target state.", 5.8)
+        add_figure(doc, "Radius_vs_Time.png", "Figure 3. Spacecraft radius history.", 5.8)
+        add_figure(doc, "DeltaV_Maneuvers.png", "Figure 4. Impulsive maneuver magnitudes.", 5.5)
+        add_figure(doc, "Position_Error_Final_Window.png", "Figure 5. Position error near final target epoch.", 5.8)
+        add_figure(doc, "KHU_Visibility.png", "Figure 6. Visibility intervals from KHU.", 5.8)
 
-    add_heading(doc, "10. 결론", 1)
+    add_heading(doc, "7. 결론", 1)
     add_body(
         doc,
-        "본 설계는 과제 안내 PDF의 Section 3.2 target state vector를 기준 조건으로 사용하고, mission priority를 먼저 정의한 뒤 "
-        "Pareto front에서 대표 설계점을 선택하였다. 최종 선택은 단순 최저 Delta V가 아니라, 짧은 운용 지연과 충분한 연료 절감 사이의 "
-        "균형을 만족하는 1.2000-day knee point이다."
+        "최종 코드는 교수님 답변을 반영하여 Section 3.2 target state vector를 사용하고, target motion을 two-body dynamics로 전파한다. "
+        "또한 대표 설계점은 사후적으로 보기 좋은 점을 고른 것이 아니라, 실제 위성 초기 운용에서 합리적인 4일 이내 운용 창을 먼저 정하고 "
+        "그 안에서 total Delta V를 최소화하는 방식으로 결정하였다.",
     )
     add_body(
         doc,
-        "따라서 이 결과는 '최적해가 하나로 자동 결정된다'는 의미가 아니라, Pareto-optimal 후보군 중에서 임무 우선순위에 가장 맞는 해를 "
-        "논리적으로 선택한 것이다. 그래프가 knee 형태로 급격히 변하는 점 역시 transfer 구성에 따라 가능한 현상이며, 본 결과에서는 그 knee가 "
-        "대표 설계점 선정의 근거로 사용되었다."
-    )
-
-    add_heading(doc, "Appendix A. MATLAB 구현 요약", 1)
-    add_bullets(
-        doc,
-        [
-            "SPACE312_Final_Project_Main.m: main script, constants, target state mode, Lambert sweep, Pareto filtering, report solution selection",
-            "targetStateMode = PDF_GIVEN: project PDF Section 3.2 target state vector를 그대로 사용",
-            "runShootingRefinement = false: 제출 결과는 optimizer가 아니라 수업 기반 Lambert sweep으로 생성",
-            "chooseBalancedKneeIndex: normalized Pareto front에서 knee point를 선택",
-            "results/FinalProject_ParetoResults.csv: 전체 Pareto 후보 저장",
-            "results/FinalProject_ReportSolutions.csv: 보고서용 대표 후보 저장",
-            "results/balanced_knee: 최종 대표 설계점의 개별 그림과 case summary 저장",
-        ],
+        f"따라서 제출 대표해는 Delta t = {fmt(selected, 'TOF_days', approx=approx)} days, "
+        f"total Delta V = {fmt(selected, 'dVtotal_km_s', approx=approx)} km/s이다. "
+        "이 해는 1일 내외의 빠른 transfer보다 연료 소모를 크게 줄이면서도, 10일대 전역 minimum-fuel 해에 비해 초기 운용 지연을 크게 줄이는 절충해이다.",
     )
 
     doc.save(OUT)
@@ -336,5 +293,4 @@ def build():
 
 
 if __name__ == "__main__":
-    path = build()
-    print(path)
+    print(build())

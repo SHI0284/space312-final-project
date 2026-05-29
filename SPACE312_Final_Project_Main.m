@@ -8,19 +8,39 @@ format longG;
 % This script is intentionally self-contained. It uses only standard MATLAB
 % functions and local functions included at the end of this file.
 %
-% Main submitted strategy, aligned with the lecture material:
-%   1) Two-body propagation for GTO and GEO states.
-%   2) Two-impulse Lambert transfer over a dense transfer-time grid.
-%   3) Maneuver cost from vector Delta V at departure and arrival.
-%   4) Pareto filtering in [sum dV, transfer time].
-%   5) ECI/ECEF/SEZ visibility calculation and required figures.
+% Main strategy:
+%   1) Dense zero-revolution Lambert sweep over transfer duration.
+%   2) Coarser multi-revolution Lambert sweep for longer-duration candidates.
+%   3) Pareto filtering in [sum dV, transfer time].
+%   4) Optional direct-shooting refinement of selected Pareto points.
+%   5) Required figures, result table, visibility intervals, and GIF animation.
 %
 % Units: km, s, km/s, rad unless stated otherwise.
 
 %% User switches
-runShootingRefinement = false;    % Not used for the submitted result; kept only as a diagnostic option.
-makeAnimation = true;             % Writes a GIF in the results folder.
-targetStateMode = "PDF_GIVEN";     % "PDF_GIVEN" or "CONSISTENT_GEO_FROM_ERA"
+runShootingRefinement = false;    % Set true for optional slow direct-shooting refinement.
+runMultiRevLambert = true;        % Adds multi-revolution Lambert candidates.
+makeAnimation = true;             % Writes a rendezvous animation GIF in the results folder.
+saveFigureFiles = true;           % Writes separate PNG files and leaves figures open as docked tabs.
+exportCaseFolders = false;        % Set true only when you want separate case folders.
+
+% Instructor guidance: choose one representative design point after defining
+% a mission priority.
+% Options: "fast_with_dv_margin", "low_dv", "knee", or "fast".
+% Submitted mission priority: complete rendezvous inside a practical
+% four-day early-orbit commissioning window, then minimize total Delta V inside
+% that window. This treats propellant as the limiting mission resource once the
+% transfer remains short enough for realistic operations.
+missionPriority = "low_dv";
+timeWeight = 0.50;                % Used only for missionPriority = "knee".
+deltaVWeight = 0.50;              % Used only for missionPriority = "knee".
+deltaVMarginPercent = 3.0;        % Used only for missionPriority = "fast_with_dv_margin".
+representativeMinTOFDays = 1.0;   % Representative solution search lower bound.
+representativeMaxTOFDays = 4.0;    % Practical representative-design upper bound. Use inf for no upper bound.
+multiRevTOFSamples = 400;         % Coarser than the zero-rev sweep to keep runtime reasonable.
+maxLambertRevs = 20;              % Maximum complete revolutions to try for Lambert candidates.
+terminalPositionToleranceKm = 10; % Candidate must actually arrive within this distance of the target.
+
 resultsDir = fullfile(pwd,'results');
 if ~exist(resultsDir,'dir')
     mkdir(resultsDir);
@@ -39,24 +59,21 @@ UTC0 = [2026 6 1 0 0 0];
 R0 = [-42164.1729; 0.0000; 0.0000];
 V0minus = [0.000000; -1.458327; -0.664598];
 
-if targetStateMode == "PDF_GIVEN"
-    % Use the explicit Section 3.2 target state as the authoritative
-    % rendezvous boundary condition. This is the safest setting unless the
-    % instructor confirms that the table x component should be recomputed.
-    RGEO0 = [41244.6079; 12577.3213; 0.0000];
-    VGEO0 = [-0.917153; 2.934683; 0.000000];
-elseif targetStateMode == "CONSISTENT_GEO_FROM_ERA"
-    % Reconstruct a radius-consistent GEO slot from Section 2 constants.
-    thetaGEO0 = thetaERA0 + lambdaGEO;
-    RGEO0 = rGEO*[cos(thetaGEO0); sin(thetaGEO0); 0];
-    VGEO0 = cross([0;0;wE],RGEO0);
-else
-    error('Unknown targetStateMode: %s',targetStateMode);
-end
+% Per instructor clarification, the Section 3.2 target state vector is the
+% authoritative boundary condition for this project.
+RGEO0 = [41244.6079; 12577.3213; 0.0000];
+VGEO0 = [-0.917153; 2.934683; 0.000000];
 
-fprintf('Target state mode: %s\n',targetStateMode);
-fprintf('  |RGEO0| = %.6f km, rGEO reference = %.6f km\n',norm(RGEO0),rGEO);
-fprintf('  r dot v = %.6e km^2/s\n',dot(RGEO0,VGEO0));
+targetRadius0 = norm(RGEO0);
+targetSpeed0 = norm(VGEO0);
+targetRadialSpeed0 = dot(RGEO0,VGEO0)/targetRadius0;
+
+fprintf('\nSection 3.2 target-state diagnostics:\n');
+fprintf('  |RGEO0|          = %.6f km\n',targetRadius0);
+fprintf('  nominal rGEO     = %.6f km\n',rGEO);
+fprintf('  |VGEO0|          = %.6f km/s\n',targetSpeed0);
+fprintf('  radial speed     = %.6e km/s\n',targetRadialSpeed0);
+fprintf('  Note: nonzero radial speed / radius mismatch makes the propagated target path non-circular.\n');
 
 % KHU global campus approximation, used for the required visibility plot.
 KHU.lat = deg2rad(37.2411);
@@ -65,8 +82,14 @@ KHU.h = 0.08;
 KHU.name = 'KHU';
 
 %% Search grid
-tofDaysDense = linspace(1,30,1161);     % 0.025 day spacing
+tofDaysDense = linspace(1,30,20000);
+tofSecondsDense = tofDaysDense*86400;
 nTOF = numel(tofDaysDense);
+
+targetSweepTimeGrid = [0, tofSecondsDense];
+[RtargetSweep,VtargetSweep] = propagateTrajectory(RGEO0,VGEO0,targetSweepTimeGrid,mu);
+RtargetSweep = RtargetSweep(:,2:end);
+VtargetSweep = VtargetSweep(:,2:end);
 
 records = struct('method',{},'tofDays',{},'tof',{},'direction',{}, ...
     'V1plus',{},'V2minus',{},'dV1',{},'dV2',{},'dVtotal',{}, ...
@@ -77,8 +100,9 @@ fprintf('Commence GTO-to-GEO-KOMPSAT-2A search...\n');
 fprintf('Dense Lambert sweep: %d time-of-flight samples, prograde and retrograde.\n',nTOF);
 
 for k = 1:nTOF
-    tof = tofDaysDense(k)*86400;
-    [Rtarget,Vtarget] = targetGEOState(tof,RGEO0,VGEO0,wE);
+    tof = tofSecondsDense(k);
+    Rtarget = RtargetSweep(:,k);
+    Vtarget = VtargetSweep(:,k);
 
     for direction = ["Prograde","Retrograde"]
         try
@@ -101,19 +125,61 @@ end
 
 fprintf('Lambert candidates generated: %d\n',numel(records));
 
-if abs(norm(RGEO0) - norm(R0)) < 1.0
-    records = addSamePointPhasingCandidates(records,R0,V0minus,RGEO0,VGEO0, ...
-        mu,wE,rGEO,Re,lambdaGEO);
-    fprintf('Candidates after adding GEO-radius phasing family: %d\n',numel(records));
-else
-    fprintf(['Skipping same-point phasing family because the selected target ', ...
-        'state radius differs from the initial apogee radius by %.3f km.\n'], ...
-        abs(norm(RGEO0) - norm(R0)));
+if runMultiRevLambert
+    fprintf('Adding multi-revolution Lambert candidates: %d TOF samples, up to %d revolutions.\n', ...
+        multiRevTOFSamples,maxLambertRevs);
+    sampleIdx = unique(round(linspace(1,nTOF,multiRevTOFSamples)));
+    nBeforeMultiRev = numel(records);
+
+    for ii = 1:numel(sampleIdx)
+        k = sampleIdx(ii);
+        tof = tofSecondsDense(k);
+        tofDays = tofDaysDense(k);
+        Rtarget = RtargetSweep(:,k);
+        Vtarget = VtargetSweep(:,k);
+
+        for direction = ["Prograde","Retrograde"]
+            maxRevHere = min(maxLambertRevs,max(1,floor(tofDays)));
+            for nRev = 1:maxRevHere
+                for lowPath = [true false]
+                    try
+                        [V1list,V2list] = LambertMultiRevIzzo(R0,Rtarget,tof,mu, ...
+                            char(direction),nRev,lowPath);
+                        for q = 1:size(V1list,2)
+                            V1plus = V1list(:,q);
+                            V2minus = V2list(:,q);
+                            if any(~isfinite(V1plus)) || any(~isfinite(V2minus))
+                                continue;
+                            end
+
+                            dV1 = norm(V1plus - V0minus);
+                            dV2 = norm(Vtarget - V2minus);
+                            rec = makeRecord("MultiRevLambert",tofDays,tof, ...
+                                sprintf('%s, M=%d, %s',char(direction),nRev,pathName(lowPath)), ...
+                                V1plus,V2minus,dV1,dV2,Rtarget,Vtarget,0);
+                            rec.nRev = nRev;
+                            records(end+1) = rec; %#ok<SAGROW>
+                        end
+                    catch
+                        % Infeasible multi-revolution branches are skipped.
+                    end
+                end
+            end
+        end
+    end
+
+    fprintf('Multi-revolution Lambert candidates added: %d\n',numel(records)-nBeforeMultiRev);
 end
 
-%% Optional diagnostic direct-shooting refinement
-% This block is intentionally disabled for the submitted result. The final
-% report uses the lecture-based Lambert sweep and Pareto filtering above.
+records = addSamePointPhasingCandidates(records,R0,V0minus,RGEO0,VGEO0, ...
+    mu,wE,rGEO,Re,lambdaGEO);
+fprintf('Candidates after adding GEO-radius phasing family: %d\n',numel(records));
+
+%% Optional direct-shooting refinement
+% This step is included because long-duration rendezvous can hide useful
+% multi-revolution/phasing solutions that a simple zero-revolution Lambert
+% sweep may miss. The optimizer minimizes dV plus a large terminal-position
+% penalty, using only fminsearch.
 if runShootingRefinement && ~isempty(records)
     fprintf('Refining selected Pareto and grid candidates with direct shooting...\n');
     seedIdx = chooseRefinementSeeds(records,30);
@@ -135,7 +201,7 @@ if runShootingRefinement && ~isempty(records)
     for s = 1:maxRefine
         tofDays = seedIdx(s).tofDays;
         tof = tofDays*86400;
-        [Rtarget,Vtarget] = targetGEOState(tof,RGEO0,VGEO0,wE);
+        [Rtarget,Vtarget] = targetGEOState(tof,RGEO0,VGEO0,mu);
         vSeed = seedIdx(s).V1plus(:);
 
         scale = [3; 3; 3];
@@ -164,6 +230,7 @@ if runShootingRefinement && ~isempty(records)
 end
 
 %% Pareto set and representative solutions
+records = validateParetoReachability(records,R0,mu,terminalPositionToleranceKm);
 valid = [records.dVtotal] < 20 & [records.tofDays] >= 1 & [records.tofDays] <= 30;
 records = records(valid);
 
@@ -173,15 +240,41 @@ pareto = records(paretoMask);
 pareto = pareto(order);
 
 % Representative points: fastest, knee-ish, lowest dV, plus a few spread-out
-% Pareto points for the final report table.
-idxBalancedPareto = chooseBalancedKneeIndex(pareto);
-balancedSolution = pareto(idxBalancedPareto);
-reportSet = chooseReportSet(pareto,8,idxBalancedPareto);
+% Pareto points for the final report table. The submitted design point is
+% selected separately using the mission priority above.
+reportSet = chooseReportSet(pareto,8);
+representativeCandidates = buildRepresentativeCandidateSet(records, ...
+    representativeMinTOFDays,representativeMaxTOFDays);
+representativeSolution = chooseRepresentativeSolution(representativeCandidates,missionPriority, ...
+    timeWeight,deltaVWeight,deltaVMarginPercent);
+reportSet = includeSolution(reportSet,representativeSolution);
 fastSolution = pareto(1);
-minDvSolution = pareto(end);
-bestForAnimation = balancedSolution; % Main design point: strong dV saving without using the full 30 days.
+[~,minDvIdx] = min([pareto.dVtotal]);
+minDvSolution = pareto(minDvIdx);
+bestForAnimation = representativeSolution; % Submitted design point based on mission priority.
 
 fprintf('\nPareto-optimal candidates: %d\n',numel(pareto));
+fprintf('Mission priority for submitted design point: %s\n',char(missionPriority));
+if strcmpi(missionPriority,"knee")
+    fprintf('  Knee score weights: time %.2f, total dV %.2f\n', ...
+        timeWeight,deltaVWeight);
+    fprintf('  Representative candidate constraint: %.2f <= TOF <= %.2f days\n', ...
+        representativeMinTOFDays,representativeMaxTOFDays);
+    fprintf('  Constrained Pareto candidates available: %d\n',numel(representativeCandidates));
+elseif strcmpi(missionPriority,"fast_with_dv_margin")
+    fprintf('  dV margin from minimum-dV Pareto point: %.2f%%\n',deltaVMarginPercent);
+    fprintf('  Representative candidate constraint: %.2f <= TOF <= %.2f days\n', ...
+        representativeMinTOFDays,representativeMaxTOFDays);
+    fprintf('  Constrained Pareto candidates available: %d\n',numel(representativeCandidates));
+elseif strcmpi(missionPriority,"low_dv") || strcmpi(missionPriority,"fast")
+    fprintf('  Representative candidate constraint: %.2f <= TOF <= %.2f days\n', ...
+        representativeMinTOFDays,representativeMaxTOFDays);
+    fprintf('  Constrained Pareto candidates available: %d\n',numel(representativeCandidates));
+end
+fprintf('Fastest Pareto point: TOF %.6f days, total dV %.6f km/s\n', ...
+    fastSolution.tofDays,fastSolution.dVtotal);
+fprintf('Lowest-dV Pareto point: TOF %.6f days, total dV %.6f km/s\n', ...
+    minDvSolution.tofDays,minDvSolution.dVtotal);
 printResultTable(reportSet);
 writeResultCsv(fullfile(resultsDir,'FinalProject_ParetoResults.csv'),pareto);
 writeResultCsv(fullfile(resultsDir,'FinalProject_ReportSolutions.csv'),reportSet);
@@ -193,27 +286,33 @@ timeGrid = linspace(0,bestForAnimation.tof,nPlot);
 RtargetMotion = zeros(3,nPlot);
 VtargetMotion = zeros(3,nPlot);
 for k = 1:nPlot
-    [RtargetMotion(:,k),VtargetMotion(:,k)] = targetGEOState(timeGrid(k),RGEO0,VGEO0,wE);
+    [RtargetMotion(:,k),VtargetMotion(:,k)] = targetGEOState(timeGrid(k),RGEO0,VGEO0,mu);
 end
 positionError = vecnorm(Rtraj - RtargetMotion,2,1);
 radius = vecnorm(Rtraj,2,1);
 elevation = visibilityElevation(Rtraj,timeGrid,JD0,KHU,Re);
 intervals = visibilityIntervals(timeGrid,elevation);
 
-plotPareto(pareto,reportSet,fullfile(resultsDir,'Pareto_dV_vs_TOF.png'));
-plotTrajectory3D(Rtraj,RtargetMotion,bestForAnimation,R0,RGEO0,Re,rGEO, ...
-    fullfile(resultsDir,'Trajectory3D.png'));
-plotRadius(timeGrid,radius,rGEO,fullfile(resultsDir,'Radius_vs_Time.png'));
-plotFinalError(timeGrid,positionError,fullfile(resultsDir,'Position_Error_Final_Window.png'));
-plotManeuverBars(bestForAnimation,fullfile(resultsDir,'DeltaV_Maneuvers.png'));
-plotVisibility(timeGrid,elevation,intervals,fullfile(resultsDir,'KHU_Visibility.png'));
-
-if makeAnimation
-    animateTransferGif(Rtraj,RtargetMotion,timeGrid,bestForAnimation,Re,rGEO, ...
-        fullfile(resultsDir,'GTO_to_GEO_KOMPSAT2A_Animation.gif'));
+if saveFigureFiles
+    plotPareto(pareto,reportSet,fullfile(resultsDir,'Pareto_dV_vs_TOF.png'));
+    plotTrajectory3D(Rtraj,RtargetMotion,bestForAnimation,R0,RGEO0,Re,rGEO, ...
+        fullfile(resultsDir,'Trajectory3D.png'));
+    plotRadius(timeGrid,radius,rGEO,fullfile(resultsDir,'Radius_vs_Time.png'));
+    plotFinalError(timeGrid,positionError,fullfile(resultsDir,'Position_Error_Final_Window.png'));
+    plotManeuverBars(bestForAnimation,fullfile(resultsDir,'DeltaV_Maneuvers.png'));
+    plotVisibility(timeGrid,elevation,intervals,fullfile(resultsDir,'KHU_Visibility.png'));
 end
 
-fprintf('\nSelected solution for detailed plots and animation:\n');
+if makeAnimation
+    try
+        animateTransferGif(Rtraj,RtargetMotion,timeGrid,bestForAnimation,Re,rGEO, ...
+            fullfile(resultsDir,'GTO_to_GEO_KOMPSAT2A_Animation.gif'));
+    catch ME
+        warning('GIF animation was skipped because getframe failed: %s',ME.message);
+    end
+end
+
+fprintf('\nSubmitted representative design point:\n');
 fprintf('  Method       : %s\n',bestForAnimation.method);
 fprintf('  TOF          : %.6f days\n',bestForAnimation.tofDays);
 fprintf('  dV1          : %.6f km/s\n',bestForAnimation.dV1);
@@ -231,14 +330,16 @@ else
     end
 end
 
-fprintf('\nSaved outputs in: %s\n',resultsDir);
+fprintf('\nFigures are displayed as docked tabs, and output files are saved in: %s\n',resultsDir);
 fprintf('Simulation Time: %.3f seconds\n',toc);
 
 %% Export separated case folders for easier report/inspection workflow
-caseList = [fastSolution, balancedSolution, minDvSolution];
-caseNames = ["fast_transfer", "balanced_knee", "min_dv"];
-for c = 1:numel(caseList)
-    exportCaseFolder(caseList(c),caseNames(c),resultsDir,R0,RGEO0,VGEO0,mu,wE,JD0,KHU,Re,rGEO);
+if exportCaseFolders
+    caseList = [fastSolution, representativeSolution, minDvSolution];
+    caseNames = ["fast_solution", "representative_mission_priority", "min_dv_solution"];
+    for c = 1:numel(caseList)
+        exportCaseFolder(caseList(c),caseNames(c),resultsDir,R0,RGEO0,VGEO0,mu,wE,JD0,KHU,Re,rGEO);
+    end
 end
 
 %% ========================================================================
@@ -262,13 +363,16 @@ function rec = makeRecord(method,tofDays,tof,direction,V1plus,V2minus,dV1,dV2,Rt
     rec.rpPhase = NaN;
 end
 
-function [R,V] = targetGEOState(t,RGEO0,VGEO0,wE)
-    theta = wE*t;
-    C = [cos(theta), -sin(theta), 0; ...
-         sin(theta),  cos(theta), 0; ...
-         0,           0,          1];
-    R = C*RGEO0;
-    V = C*VGEO0;
+function [R,V] = targetGEOState(t,RGEO0,VGEO0,mu)
+    % The instructor clarified that the Section 3.2 state vector is the
+    % project boundary condition. Propagate that target state with the same
+    % two-body model used for the transfer spacecraft.
+    if abs(t) < eps
+        R = RGEO0;
+        V = VGEO0;
+    else
+        [R,V] = propagateState(RGEO0,VGEO0,t,mu);
+    end
 end
 
 function records = addSamePointPhasingCandidates(records,R0,V0minus,RGEO0,VGEO0,mu,wE,rGEO,Re,lambdaGEO)
@@ -277,6 +381,12 @@ function records = addSamePointPhasingCandidates(records,R0,V0minus,RGEO0,VGEO0,
     % orbit that starts and ends at the same GEO-radius point. This exploits
     % the special geometry of the project and usually beats the pure
     % zero-revolution Lambert baseline for long-duration cases.
+    if abs(norm(RGEO0) - rGEO) > 1e-3 || abs(dot(RGEO0,VGEO0)) > 1e-3
+        fprintf(['Skipping analytic same-point phasing family because the Section 3.2 ', ...
+            'target state is not a circular GEO-radius state.\n']);
+        return;
+    end
+
     thetaTarget0 = atan2(RGEO0(2),RGEO0(1));
     thetaStart = atan2(R0(2),R0(1));
     dtheta = mod(thetaStart - thetaTarget0,2*pi);
@@ -313,7 +423,7 @@ function records = addSamePointPhasingCandidates(records,R0,V0minus,RGEO0,VGEO0,
             end
 
             Vphase = vPhase*tangent;
-            [Rtarget,Vtarget] = targetGEOState(tof,RGEO0,VGEO0,wE);
+            [Rtarget,Vtarget] = targetGEOState(tof,RGEO0,VGEO0,mu);
             dV1 = norm(Vphase - V0minus);
             dV2 = norm(Vtarget - Vphase);
             posErr = norm(Rtarget - R0);
@@ -417,6 +527,124 @@ function [V1plus,V2minus] = LambertTd(R1,R2,dt,mu,mode)
     V2minus = (gdot*R2 - R1)/g;
 end
 
+function [V1list,V2list] = LambertMultiRevIzzo(R1,R2,dt,mu,mode,M,lowPath)
+    r1 = norm(R1);
+    r2 = norm(R2);
+    cVec = R2(:) - R1(:);
+    c = norm(cVec);
+    s = 0.5*(r1 + r2 + c);
+    if c < 1e-10 || s <= 0 || M < 1
+        error('Invalid multi-revolution Lambert geometry.');
+    end
+
+    lambda = sqrt(max(0,1 - c/s));
+    ih = cross(R1(:),R2(:));
+    if norm(ih) < 1e-12
+        error('Multi-revolution Lambert singular plane.');
+    end
+    ih = ih/norm(ih);
+
+    if strcmpi(mode,'Prograde')
+        if ih(3) < 0
+            ih = -ih;
+            lambda = -lambda;
+        end
+    elseif strcmpi(mode,'Retrograde')
+        if ih(3) >= 0
+            ih = -ih;
+            lambda = -lambda;
+        end
+    else
+        error('mode must be Prograde or Retrograde.');
+    end
+
+    if ~lowPath
+        lambda = -lambda;
+    end
+
+    Ttarget = sqrt(2*mu/s^3)*dt;
+    xRoots = findIzzoXRoots(lambda,M,Ttarget);
+    if isempty(xRoots)
+        error('No multi-revolution Lambert root found.');
+    end
+
+    ir1 = R1(:)/r1;
+    ir2 = R2(:)/r2;
+    it1 = cross(ih,ir1);
+    it2 = cross(ih,ir2);
+
+    gamma = sqrt(mu*s/2);
+    rho = (r1 - r2)/c;
+    sigma = sqrt(max(0,1 - rho^2));
+
+    V1list = zeros(3,numel(xRoots));
+    V2list = zeros(3,numel(xRoots));
+    for k = 1:numel(xRoots)
+        x = xRoots(k);
+        y = sqrt(max(0,1 - lambda^2*(1 - x^2)));
+        vr1 = gamma*((lambda*y - x) - rho*(lambda*y + x))/r1;
+        vr2 = -gamma*((lambda*y - x) + rho*(lambda*y + x))/r2;
+        vt = gamma*sigma*(y + lambda*x);
+        vt1 = vt/r1;
+        vt2 = vt/r2;
+        V1list(:,k) = vr1*ir1 + vt1*it1;
+        V2list(:,k) = vr2*ir2 + vt2*it2;
+    end
+end
+
+function xRoots = findIzzoXRoots(lambda,M,Ttarget)
+    epsX = 1e-8;
+    xGrid = linspace(-1 + epsX,1 - epsX,900);
+    fGrid = nan(size(xGrid));
+    for k = 1:numel(xGrid)
+        fGrid(k) = izzoTimeOfFlight(xGrid(k),lambda,M) - Ttarget;
+    end
+
+    xRoots = [];
+    for k = 1:numel(xGrid)-1
+        f1 = fGrid(k);
+        f2 = fGrid(k+1);
+        if ~isfinite(f1) || ~isfinite(f2)
+            continue;
+        end
+        if f1 == 0
+            xRoots(end+1) = xGrid(k); %#ok<AGROW>
+        elseif f1*f2 < 0
+            try
+                root = fzero(@(x) izzoTimeOfFlight(x,lambda,M) - Ttarget, ...
+                    [xGrid(k), xGrid(k+1)]);
+                if isfinite(root) && root > -1 && root < 1
+                    if isempty(xRoots) || all(abs(xRoots - root) > 1e-6)
+                        xRoots(end+1) = root; %#ok<AGROW>
+                    end
+                end
+            catch
+            end
+        end
+    end
+end
+
+function T = izzoTimeOfFlight(x,lambda,M)
+    oneMinusX2 = 1 - x^2;
+    if oneMinusX2 <= 0
+        T = NaN;
+        return;
+    end
+    y = sqrt(max(0,1 - lambda^2*oneMinusX2));
+    arg = x*y + lambda*oneMinusX2;
+    arg = max(-1,min(1,arg));
+    psi = acos(arg);
+    T = ((psi + M*pi)/sqrt(oneMinusX2) + lambda*y - x)/oneMinusX2;
+end
+
+function name = pathName(lowPath)
+    if lowPath
+        name = 'low';
+    else
+        name = 'high';
+    end
+end
+
 function [S,C] = stumpff(z)
     if z > 0
         sqz = sqrt(z);
@@ -484,6 +712,64 @@ function [R,V] = propagateTrajectory(R0,V0,tGrid,mu)
     V = X(:,4:6).';
 end
 
+function records = validateParetoReachability(records,R0,mu,tolKm)
+    % A Lambert velocity candidate is useful only if numerical propagation
+    % actually reaches the intended final target. This guard is especially
+    % important for experimental multi-revolution branches.
+    maxPass = 20;
+    totalChecked = 0;
+    totalRejected = 0;
+
+    for pass = 1:maxPass
+        basicMask = [records.dVtotal] < 20 & [records.tofDays] >= 1 & [records.tofDays] <= 30;
+        if ~any(basicMask)
+            break;
+        end
+
+        basicIdx = find(basicMask);
+        paretoMask = paretoFilter([records(basicIdx).dVtotal].',[records(basicIdx).tofDays].');
+        checkIdx = basicIdx(paretoMask);
+        keep = true(size(records));
+        changed = false;
+
+        for q = 1:numel(checkIdx)
+            idx = checkIdx(q);
+            totalChecked = totalChecked + 1;
+
+            try
+                oldDVTotal = records(idx).dVtotal;
+                [Rf,Vf] = propagateState(R0,records(idx).V1plus,records(idx).tof,mu);
+                posErr = norm(Rf - records(idx).Rtarget);
+                records(idx).posErrFinal = posErr;
+                records(idx).V2minus = Vf;
+                records(idx).dV2 = norm(records(idx).Vtarget - Vf);
+                records(idx).dVtotal = records(idx).dV1 + records(idx).dV2;
+                if abs(records(idx).dVtotal - oldDVTotal) > 1e-8
+                    changed = true;
+                end
+
+                if ~isfinite(posErr) || posErr > tolKm
+                    keep(idx) = false;
+                    totalRejected = totalRejected + 1;
+                    changed = true;
+                end
+            catch
+                keep(idx) = false;
+                totalRejected = totalRejected + 1;
+                changed = true;
+            end
+        end
+
+        records = records(keep);
+        if ~changed
+            break;
+        end
+    end
+
+    fprintf('Reachability check: propagated %d Pareto-level candidates; rejected %d with final error > %.3g km.\n', ...
+        totalChecked,totalRejected,tolKm);
+end
+
 function dX = twoBodyEOM(~,X,mu)
     R = X(1:3);
     V = X(4:6);
@@ -507,64 +793,137 @@ function mask = paretoFilter(dV,tofDays)
     end
 end
 
-function reportSet = chooseReportSet(pareto,nPick,idxBalanced)
+function reportSet = chooseReportSet(pareto,nPick)
     if isempty(pareto)
         error('No Pareto solution found.');
     end
     [~,fastIdx] = min([pareto.tofDays]);
     [~,lowDvIdx] = min([pareto.dVtotal]);
     spread = round(linspace(1,numel(pareto),min(nPick,numel(pareto))));
-    idx = unique([fastIdx, idxBalanced, spread, lowDvIdx]);
+    idx = unique([fastIdx, spread, lowDvIdx]);
     reportSet = pareto(idx);
     [~,order] = sort([reportSet.tofDays]);
     reportSet = reportSet(order);
 end
 
-function idx = chooseBalancedKneeIndex(pareto)
-    % Select the representative design point as the knee of the normalized
-    % Pareto front. This is a common engineering choice when neither
-    % objective has an externally assigned weight.
-    n = numel(pareto);
-    if n <= 2
-        idx = 1;
-        return;
+function candidates = buildRepresentativeCandidateSet(records,minTOFDays,maxTOFDays)
+    candidateMask = [records.tofDays] >= minTOFDays & [records.tofDays] <= maxTOFDays;
+    candidates = records(candidateMask);
+    if isempty(candidates)
+        error('No candidate solution satisfies %.3f <= TOF <= %.3f days.', ...
+            minTOFDays,maxTOFDays);
     end
 
-    tof = [pareto.tofDays].';
-    dv = [pareto.dVtotal].';
-    x = normalize01(tof);
-    y = normalize01(dv);
-
-    p1 = [x(1), y(1)];
-    p2 = [x(end), y(end)];
-    lineVec = p2 - p1;
-    if norm(lineVec) < eps
-        [~,idx] = min(sqrt(x.^2 + y.^2));
-        return;
-    end
-    lineVec = lineVec/norm(lineVec);
-
-    dist = zeros(n,1);
-    for k = 1:n
-        p = [x(k), y(k)];
-        projection = p1 + dot(p - p1,lineVec)*lineVec;
-        dist(k) = norm(p - projection);
-    end
-
-    % End points are already represented by fastest and minimum-dV cases.
-    dist(1) = -inf;
-    dist(end) = -inf;
-    [~,idx] = max(dist);
+    paretoMask = paretoFilter([candidates.dVtotal].',[candidates.tofDays].');
+    candidates = candidates(paretoMask);
+    [~,order] = sort([candidates.tofDays]);
+    candidates = candidates(order);
 end
 
-function y = normalize01(x)
-    xmin = min(x);
-    xmax = max(x);
-    if abs(xmax - xmin) < eps
-        y = zeros(size(x));
-    else
-        y = (x - xmin)/(xmax - xmin);
+function sol = chooseRepresentativeSolution(candidates,missionPriority,timeWeight,deltaVWeight,deltaVMarginPercent)
+    if isempty(candidates)
+        error('No representative candidate solution found.');
     end
+
+    switch lower(char(missionPriority))
+        case 'fast_with_dv_margin'
+            sol = chooseFastWithinDvMargin(candidates,deltaVMarginPercent);
+        case 'fast'
+            [~,idx] = min([candidates.tofDays]);
+            sol = candidates(idx);
+        case 'low_dv'
+            [~,idx] = min([candidates.dVtotal]);
+            sol = candidates(idx);
+        case 'knee'
+            sol = chooseKneeSolution(candidates,timeWeight,deltaVWeight);
+        otherwise
+            error('missionPriority must be "fast_with_dv_margin", "low_dv", "knee", or "fast".');
+    end
+end
+
+function sol = chooseFastWithinDvMargin(pareto,deltaVMarginPercent)
+    dV = [pareto.dVtotal];
+    minDV = min(dV);
+    dVLimit = minDV*(1 + deltaVMarginPercent/100);
+    feasible = pareto(dV <= dVLimit);
+    if isempty(feasible)
+        error('No Pareto solution found within %.2f%% of minimum dV.',deltaVMarginPercent);
+    end
+
+    [~,idx] = min([feasible.tofDays]);
+    sol = feasible(idx);
+end
+
+function sol = chooseKneeSolution(pareto,timeWeight,deltaVWeight)
+    %#ok<INUSD>
+    % Normalize transfer time and total dV, then select the point with the
+    % largest perpendicular distance from the chord connecting the fastest and
+    % lowest-Delta-V endpoints. This geometric Pareto knee captures the point
+    % where additional waiting starts producing only small fuel savings.
+    tof = [pareto.tofDays];
+    dV = [pareto.dVtotal];
+
+    if numel(pareto) <= 2
+        [~,idx] = min([pareto.dVtotal]);
+        sol = pareto(idx);
+        return;
+    end
+
+    tofRange = max(tof) - min(tof);
+    if tofRange < eps
+        tofNorm = zeros(size(tof));
+    else
+        tofNorm = (tof - min(tof)) / tofRange;
+    end
+
+    dVRange = max(dV) - min(dV);
+    if dVRange < eps
+        dVNorm = zeros(size(dV));
+    else
+        dVNorm = (dV - min(dV)) / dVRange;
+    end
+
+    p1 = [tofNorm(1), dVNorm(1)];
+    p2 = [tofNorm(end), dVNorm(end)];
+    chord = p2 - p1;
+    chordNorm = norm(chord);
+    if chordNorm < eps
+        [~,idx] = min([pareto.dVtotal]);
+        sol = pareto(idx);
+        return;
+    end
+
+    distance = zeros(size(tofNorm));
+    for k = 1:numel(tofNorm)
+        pk = [tofNorm(k), dVNorm(k)];
+        distance(k) = abs(det([chord; pk - p1])) / chordNorm;
+    end
+    distance([1,end]) = -inf;
+
+    [~,idx] = max(distance);
+    sol = pareto(idx);
+end
+
+function reportSet = includeSolution(reportSet,sol)
+    tolTOF = 1e-9;
+    tolDV = 1e-9;
+    isPresent = false;
+    for k = 1:numel(reportSet)
+        sameTOF = abs(reportSet(k).tofDays - sol.tofDays) < tolTOF;
+        sameDV = abs(reportSet(k).dVtotal - sol.dVtotal) < tolDV;
+        sameMethod = strcmp(reportSet(k).method,sol.method);
+        if sameTOF && sameDV && sameMethod
+            isPresent = true;
+            break;
+        end
+    end
+
+    if ~isPresent
+        reportSet(end+1) = sol; %#ok<AGROW>
+    end
+
+    [~,order] = sort([reportSet.tofDays]);
+    reportSet = reportSet(order);
 end
 
 function exportCaseFolder(sol,caseName,resultsDir,R0,RGEO0,VGEO0,mu,wE,JD0,KHU,Re,rGEO)
@@ -578,7 +937,7 @@ function exportCaseFolder(sol,caseName,resultsDir,R0,RGEO0,VGEO0,mu,wE,JD0,KHU,R
     [Rtraj,~] = propagateTrajectory(R0,sol.V1plus,timeGrid,mu);
     RtargetMotion = zeros(3,nPlot);
     for k = 1:nPlot
-        [RtargetMotion(:,k),~] = targetGEOState(timeGrid(k),RGEO0,VGEO0,wE);
+        [RtargetMotion(:,k),~] = targetGEOState(timeGrid(k),RGEO0,VGEO0,mu);
     end
     radius = vecnorm(Rtraj,2,1);
     positionError = vecnorm(Rtraj - RtargetMotion,2,1);
@@ -633,19 +992,22 @@ function writeResultCsv(fileName,solutions)
 end
 
 function plotPareto(pareto,reportSet,fileName)
-    fig = figure('Color','w','Position',[120 120 900 650]);
+    fig = figure('Color','w');
     hold on; grid on; box on;
-    plot([pareto.tofDays],[pareto.dVtotal],'b.-','LineWidth',1.5,'MarkerSize',12);
-    plot([reportSet.tofDays],[reportSet.dVtotal],'rp','MarkerFaceColor','y','MarkerSize',13);
+    plot([pareto.tofDays],[pareto.dVtotal],'b.-','LineWidth',1.5,'MarkerSize',12, ...
+        'DisplayName','Pareto candidates');
+    plot([reportSet.tofDays],[reportSet.dVtotal],'rp','MarkerFaceColor','y','MarkerSize',13, ...
+        'DisplayName','Report solutions');
     xlabel('Transfer duration \Deltat [days]');
     ylabel('Total impulsive \Deltav [km/s]');
     title('Pareto Front: GTO-to-GEO-KOMPSAT-2A Transfer');
-    legend('Pareto candidates','Report solutions','Location','best');
+    legend('Location','best');
+    drawnow;
     exportgraphics(fig,fileName,'Resolution',220);
 end
 
 function plotTrajectory3D(Rtraj,RtargetMotion,sol,R0,RGEO0,Re,rGEO,fileName)
-    fig = figure('Color','w','Position',[80 80 950 820]);
+    fig = figure('Color','w');
     hold on; grid on; axis equal; box on;
     [xe,ye,ze] = sphere(80);
     surf(Re*xe,Re*ye,Re*ze,'FaceColor',[0.55 0.72 0.95], ...
@@ -653,16 +1015,17 @@ function plotTrajectory3D(Rtraj,RtargetMotion,sol,R0,RGEO0,Re,rGEO,fileName)
     plotGTOReference(Re,rGEO);
     plotGEOReference(rGEO);
     plot3(RtargetMotion(1,:),RtargetMotion(2,:),RtargetMotion(3,:), ...
-        'Color',[0.1 0.5 0.1],'LineWidth',1.2,'DisplayName','Target GEO motion');
+        'Color',[0.1 0.5 0.1],'LineWidth',1.2,'DisplayName','Section 3.2 target motion');
     plot3(Rtraj(1,:),Rtraj(2,:),Rtraj(3,:),'r-','LineWidth',2.0,'DisplayName','Optimized transfer');
     plot3(R0(1),R0(2),R0(3),'ko','MarkerFaceColor','w','MarkerSize',8,'DisplayName','Initial GTO apogee');
     plot3(sol.Rtarget(1),sol.Rtarget(2),sol.Rtarget(3),'ks','MarkerFaceColor','y','MarkerSize',9,'DisplayName','Final GEO target');
-    plot3(RGEO0(1),RGEO0(2),RGEO0(3),'gd','MarkerFaceColor','g','MarkerSize',7,'DisplayName','GEO-KOMPSAT-2A at t0');
+    plot3(RGEO0(1),RGEO0(2),RGEO0(3),'gd','MarkerFaceColor','g','MarkerSize',7,'DisplayName','Section 3.2 target at t0');
     xlabel('ECI x [km]'); ylabel('ECI y [km]'); zlabel('ECI z [km]');
     title(sprintf('Selected Transfer: TOF %.3f days, total \\Deltav %.4f km/s',sol.tofDays,sol.dVtotal));
     view(38,24);
     camlight; lighting gouraud;
     legend('Location','bestoutside');
+    drawnow;
     exportgraphics(fig,fileName,'Resolution',220);
 end
 
@@ -684,38 +1047,41 @@ end
 
 function plotGEOReference(rGEO)
     th = linspace(0,2*pi,600);
-    plot3(rGEO*cos(th),rGEO*sin(th),zeros(size(th)),'k:','LineWidth',1.1,'DisplayName','Target GEO orbit');
+    plot3(rGEO*cos(th),rGEO*sin(th),zeros(size(th)),'k:','LineWidth',1.1,'DisplayName','Nominal GEO radius');
 end
 
 function plotRadius(timeGrid,radius,rGEO,fileName)
-    fig = figure('Color','w','Position',[150 140 860 520]);
+    fig = figure('Color','w');
     plot(timeGrid/86400,radius,'b-','LineWidth',1.8); hold on; grid on; box on;
     yline(rGEO,'k--','GEO radius');
     xlabel('Time after t0 [days]');
     ylabel('Radius [km]');
     title('Spacecraft Radius vs. Time');
+    drawnow;
     exportgraphics(fig,fileName,'Resolution',220);
 end
 
 function plotFinalError(timeGrid,positionError,fileName)
     finalWindow = max(timeGrid) - min(6*3600,max(timeGrid));
     idx = timeGrid >= finalWindow;
-    fig = figure('Color','w','Position',[150 140 860 520]);
+    fig = figure('Color','w');
     semilogy((timeGrid(idx)-max(timeGrid))/3600,positionError(idx),'r-','LineWidth',1.8);
     grid on; box on;
     xlabel('Time relative to arrival [hr]');
     ylabel('Position error to moving GEO target [km]');
     title('Position Error Near Final Target');
+    drawnow;
     exportgraphics(fig,fileName,'Resolution',220);
 end
 
 function plotManeuverBars(sol,fileName)
-    fig = figure('Color','w','Position',[180 160 620 500]);
+    fig = figure('Color','w');
     bar([sol.dV1 sol.dV2 sol.dVtotal]);
     grid on; box on;
     set(gca,'XTickLabel',{'Initial burn \Deltav_1','GEO insertion \Deltav_2','Total'});
     ylabel('\Deltav [km/s]');
     title('Impulsive Maneuver Magnitudes');
+    drawnow;
     exportgraphics(fig,fileName,'Resolution',220);
 end
 
@@ -752,7 +1118,7 @@ function intervals = visibilityIntervals(timeGrid,elevation)
 end
 
 function plotVisibility(timeGrid,elevation,intervals,fileName)
-    fig = figure('Color','w','Position',[150 140 900 520]);
+    fig = figure('Color','w');
     plot(timeGrid/86400,rad2deg(elevation),'b-','LineWidth',1.3); hold on; grid on; box on;
     yline(0,'k--','Horizon');
     for k = 1:size(intervals,1)
@@ -764,11 +1130,83 @@ function plotVisibility(timeGrid,elevation,intervals,fileName)
     ylabel('Elevation from KHU [deg]');
     title('Visibility Intervals from KHU');
     ylim([-90 90]);
+    drawnow;
     exportgraphics(fig,fileName,'Resolution',220);
 end
 
+function plotSummaryFigure(pareto,reportSet,Rtraj,RtargetMotion,sol,R0,RGEO0, ...
+    timeGrid,radius,positionError,elevation,intervals,Re,rGEO,fileName)
+    fig = figure('Color','w');
+
+    subplot(2,3,1);
+    hold on; grid on; box on;
+    plot([pareto.tofDays],[pareto.dVtotal],'b.-','LineWidth',1.2,'MarkerSize',8);
+    plot([reportSet.tofDays],[reportSet.dVtotal],'rp','MarkerFaceColor','y','MarkerSize',9);
+    plot(sol.tofDays,sol.dVtotal,'ko','MarkerFaceColor','g','MarkerSize',8);
+    xlabel('\Deltat [days]');
+    ylabel('Total \Deltav [km/s]');
+    title('Pareto Front');
+
+    subplot(2,3,2);
+    hold on; grid on; axis equal; box on;
+    [xe,ye,ze] = sphere(36);
+    surf(Re*xe,Re*ye,Re*ze,'FaceColor',[0.55 0.72 0.95], ...
+        'EdgeColor','none','FaceAlpha',0.35);
+    plotGTOReference(Re,rGEO);
+    plotGEOReference(rGEO);
+    plot3(RtargetMotion(1,:),RtargetMotion(2,:),RtargetMotion(3,:), ...
+        'Color',[0.1 0.5 0.1],'LineWidth',1.0);
+    plot3(Rtraj(1,:),Rtraj(2,:),Rtraj(3,:),'r-','LineWidth',1.5);
+    plot3(R0(1),R0(2),R0(3),'ko','MarkerFaceColor','w','MarkerSize',6);
+    plot3(sol.Rtarget(1),sol.Rtarget(2),sol.Rtarget(3),'ks','MarkerFaceColor','y','MarkerSize',7);
+    plot3(RGEO0(1),RGEO0(2),RGEO0(3),'gd','MarkerFaceColor','g','MarkerSize',6);
+    xlabel('ECI x [km]'); ylabel('ECI y [km]'); zlabel('ECI z [km]');
+    title('3D Trajectory');
+    view(38,24);
+
+    subplot(2,3,3);
+    plot(timeGrid/86400,radius,'b-','LineWidth',1.4); hold on; grid on; box on;
+    yline(rGEO,'k--','GEO');
+    xlabel('Time [days]');
+    ylabel('Radius [km]');
+    title('Radius vs Time');
+
+    subplot(2,3,4);
+    finalWindow = max(timeGrid) - min(6*3600,max(timeGrid));
+    idx = timeGrid >= finalWindow;
+    semilogy((timeGrid(idx)-max(timeGrid))/3600,positionError(idx),'r-','LineWidth',1.4);
+    grid on; box on;
+    xlabel('Time to arrival [hr]');
+    ylabel('Error [km]');
+    title('Final Position Error');
+
+    subplot(2,3,5);
+    bar([sol.dV1 sol.dV2 sol.dVtotal]);
+    grid on; box on;
+    set(gca,'XTickLabel',{'\Deltav_1','\Deltav_2','Total'});
+    ylabel('\Deltav [km/s]');
+    title('Maneuver Magnitudes');
+
+    subplot(2,3,6);
+    plot(timeGrid/86400,rad2deg(elevation),'b-','LineWidth',1.1); hold on; grid on; box on;
+    yline(0,'k--','Horizon');
+    for k = 1:size(intervals,1)
+        patch([intervals(k,1) intervals(k,2) intervals(k,2) intervals(k,1)]/86400, ...
+            [-90 -90 90 90],[0.8 1.0 0.8],'EdgeColor','none','FaceAlpha',0.25);
+    end
+    plot(timeGrid/86400,rad2deg(elevation),'b-','LineWidth',1.1);
+    xlabel('Time [days]');
+    ylabel('Elevation [deg]');
+    title('KHU Visibility');
+    ylim([-90 90]);
+
+    if ~isempty(fileName)
+        exportgraphics(fig,fileName,'Resolution',220);
+    end
+end
+
 function animateTransferGif(Rtraj,RtargetMotion,timeGrid,sol,Re,rGEO,fileName)
-    fig = figure('Color','w','Position',[100 100 780 740]);
+    fig = figure('Color','w','WindowStyle','normal');
     ax = axes('Parent',fig);
     hold(ax,'on'); grid(ax,'on'); axis(ax,'equal'); box(ax,'on');
     [xe,ye,ze] = sphere(50);
@@ -787,7 +1225,7 @@ function animateTransferGif(Rtraj,RtargetMotion,timeGrid,sol,Re,rGEO,fileName)
         sol.tofDays,sol.dVtotal));
     view(ax,38,24);
     xlim(ax,[-52000 52000]); ylim(ax,[-52000 52000]); zlim(ax,[-24000 24000]);
-    legend(ax,{'Earth','Target GEO','Transfer reference','Target motion','Spacecraft','Target'}, ...
+    legend(ax,{'Earth','Nominal GEO radius','Transfer reference','Section 3.2 target motion','Spacecraft','Target'}, ...
         'Location','bestoutside');
 
     nFrame = 160;
@@ -799,7 +1237,7 @@ function animateTransferGif(Rtraj,RtargetMotion,timeGrid,sol,Re,rGEO,fileName)
         path.XData = Rtraj(1,1:k); path.YData = Rtraj(2,1:k); path.ZData = Rtraj(3,1:k);
         title(ax,sprintf('t = %.2f days / %.2f days',timeGrid(k)/86400,sol.tofDays));
         drawnow;
-        frame = getframe(fig);
+        frame = getframe(ax);
         [im,map] = rgb2ind(frame2im(frame),256);
         if j == 1
             imwrite(im,map,fileName,'gif','LoopCount',inf,'DelayTime',0.045);

@@ -8,14 +8,18 @@ tradeoff evaluation.
 ## Final design choice
 
 The project uses the target GEO state vector given in the project PDF Section 3.2.
-After defining the mission priority as a balanced design between propellant saving
-and short transfer duration, the representative solution is selected from the
-Pareto front near the knee point:
+Following the instructor clarification, the submitted workflow uses the target
+GEO state vector from Section 3.2 as the authoritative rendezvous boundary
+condition. The mission priority is defined before selecting the submitted design
+point: complete rendezvous inside a practical four-day early-orbit operations
+window, then minimize total impulsive Delta V inside that window. This treats
+propellant as the limiting mission resource once the transfer duration remains
+short enough for realistic commissioning and ground operations. The full
+1-to-30-day sweep is still retained for the Pareto trade study.
 
-- Transfer duration: 1.2000 days
-- Delta V1: 2.054971 km/s
-- Delta V2: 0.543456 km/s
-- Total Delta V: 2.598428 km/s
+Run `SPACE312_Final_Project_Main.m` to regenerate the final CSV files and plots.
+The selected design point is printed in the MATLAB command window and written to
+`results/FinalProject_ReportSolutions.csv`.
 
 Main files:
 
