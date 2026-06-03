@@ -2,204 +2,208 @@
 
 ## GTO-to-GEO Transfer Trajectory Optimization for GEO-KOMPSAT-2A
 
-This project investigates an optimized impulsive transfer trajectory from an initial Geostationary Transfer Orbit (GTO) to the GEO-KOMPSAT-2A target GEO state using Earth-centered two-body dynamics.
-
-The workflow combines:
-
-* orbital propagation
-* Lambert transfer trajectory generation
-* rendezvous analysis
-* visibility analysis
-* Pareto tradeoff evaluation
-
-to identify practical transfer solutions for GEO mission operations.
-
-The project is based on the following SPACE312 concepts:
-
-* Two-body orbital propagation
-* Lambert transfer trajectory design
-* Multi-revolution Lambert solutions
-* Impulsive maneuver modeling
-* ECI / ECEF / SEZ coordinate transformation
-* GEO rendezvous analysis
-* Ground visibility analysis
-* Pareto-optimal transfer selection
+Earth-centered two-body dynamics, Lambert transfer trajectories, and Pareto tradeoff analysis were used to design a practical rendezvous trajectory from an initial GTO state to the GEO-KOMPSAT-2A target spacecraft.
 
 ---
 
-# Mission Overview
+# Project Summary
 
-The mission objective is to transfer a spacecraft from the given GTO initial condition to the GEO-KOMPSAT-2A target state while minimizing total impulsive Delta V and maintaining a realistic transfer duration.
+| Item | Value |
+|--------|--------|
+| Mission | GTO → GEO-KOMPSAT-2A Rendezvous |
+| Dynamics | Earth-centered Two-Body |
+| Search Method | Lambert + Pareto Filtering |
+| Selected Method | MultiRevLambert |
+| Transfer Duration | 3.4709 days |
+| Total Delta V | 1.8400 km/s |
+| Final Position Error | 0.000137 km |
 
-Unlike a simple GEO insertion problem, this project treats the target GEO spacecraft as a moving rendezvous target.
+### Mission Priority
 
-The target spacecraft state vector provided in Section 3.2 of the project PDF is used as the authoritative rendezvous boundary condition.
+1. Rendezvous within 4 days
+2. Minimize total ΔV
+3. Maintain realistic GEO operational feasibility
 
-Both the transfer spacecraft and the target GEO spacecraft are propagated using the same Earth-centered two-body dynamics model throughout the transfer duration.
+---
 
-Transfer search range:
+# Mission Scenario
 
-* `1 day <= transfer duration <= 30 days`
+Unlike a conventional GEO insertion problem, the target GEO spacecraft is treated as a moving rendezvous target.
 
-The final submitted design point prioritizes:
+Both spacecraft are propagated using identical Earth-centered two-body dynamics.
 
-1. Completion of rendezvous within a practical early-orbit operations window
-2. Minimization of total impulsive Delta V inside that operational constraint
-3. Stable rendezvous convergence and realistic mission feasibility
 
-Selected representative solution:
 
-| Parameter            | Value           |
-| -------------------- | --------------- |
-| Selected Method      | MultiRevLambert |
-| Direction            | Prograde        |
-| Revolution Count     | M = 3           |
-| Transfer Duration    | 3.4709 days     |
-| Delta V1             | 1.6784 km/s     |
-| Delta V2             | 0.1616 km/s     |
-| Total Delta V        | 1.8400 km/s     |
-| Final Position Error | 0.000137 km     |
+![Mission Animation](results/GTO_to_GEO_KOMPSAT2A_Animation.gif)
 
-This design point provides a balanced tradeoff between transfer duration and fuel efficiency while remaining inside a realistic GEO commissioning timeline.
+
+---
+
+# Problem Definition
+
+Given:
+
+- Initial GTO state vector
+- GEO-KOMPSAT-2A state vector
+- Transfer duration candidate
+
+Find:
+
+- Transfer trajectory
+- Departure maneuver
+- Arrival maneuver
+
+Such that the transfer spacecraft matches the target spacecraft state at the final rendezvous epoch while minimizing Total ΔV and Transfer Duration.
 
 ---
 
 # Dynamics Model
 
-The project uses Earth-centered inertial (ECI) two-body dynamics:
+The spacecraft motion is modeled using Earth-centered inertial two-body dynamics:
 
-```text id="jp8gdr"
-a = -mu * r / |r|^3
+```math
+\ddot{r} = -\mu r / |r|^3
 ```
 
-where:
+Assumptions:
 
-* `mu = 398600.4418 km^3/s^2`
-* `r = spacecraft position vector`
-
-The following perturbations are intentionally excluded:
-
-* J2 perturbation
-* Atmospheric drag
-* Solar radiation pressure
-* Third-body gravity
-
-This matches the assumptions specified in the project handout.
+- No J2 perturbation
+- No atmospheric drag
+- No solar radiation pressure
+- No third-body effects
 
 ---
 
 # Optimization Workflow
 
-The MATLAB workflow performs the following steps:
-
-1. Propagate the target GEO spacecraft for each transfer duration candidate
-2. Generate Lambert transfer trajectories
-3. Evaluate impulsive maneuver costs
-4. Compute final rendezvous position and velocity errors
-5. Apply Pareto filtering
-6. Select the representative design point based on mission priority
-
-Both zero-revolution and multi-revolution Lambert solutions are considered.
-
-Impulsive maneuver costs are computed as:
-
-```text id="k1zzlg"
-Delta V1 = ||V_departure - V_GTO_initial||
+```text
+Transfer Duration Sweep
+        ↓
+Target Propagation
+        ↓
+Lambert Solver
+        ↓
+Delta V Evaluation
+        ↓
+Rendezvous Error Analysis
+        ↓
+Pareto Filtering
+        ↓
+Representative Solution Selection
 ```
 
-```text id="2xgwj6"
-Delta V2 = ||V_target_final - V_arrival||
+---
+
+# Lambert Transfer Evaluation
+
+Departure burn:
+
+```text
+ΔV1 = ||V_departure - V_GTO||
 ```
 
-```text id="7m8a6o"
-Total Delta V = Delta V1 + Delta V2
+Arrival burn:
+
+```text
+ΔV2 = ||V_target - V_arrival||
 ```
 
-Only trajectories satisfying the rendezvous error tolerance are retained as valid candidates.
+Total maneuver cost:
+
+```text
+ΔVtotal = ΔV1 + ΔV2
+```
+
+---
+
+# Results
+
+## Candidate Solutions
+
+| Method | TOF [days] | Total ΔV [km/s] |
+|----------|----------|----------|
+| Lambert | 1.0000 | 3.4652 |
+| Lambert | 1.2610 | 2.8004 |
+| MultiRevLambert | 3.4709 | 1.8400 |
+| MultiRevLambert | 10.7387 | 1.8162 |
+
+## Pareto Observation
+
+- Transfer duration increases generally reduce total ΔV.
+- Short transfers require aggressive phasing maneuvers.
+- Multi-revolution Lambert solutions provide significant fuel savings.
+
+---
+
+# Why 3.4709 Days?
+
+The minimum-ΔV solution was not selected directly.
+
+Selection criteria:
+
+- Rendezvous completion within 4 days
+- Low total ΔV
+- Stable GEO commissioning timeline
+
+The selected 3.4709-day MultiRevLambert solution satisfies all operational constraints while maintaining strong fuel efficiency.
+
+---
+
+# Representative Design Point
+
+| Parameter | Value |
+|------------|------------|
+| Method | MultiRevLambert |
+| Revolution Count | 3 |
+| Transfer Duration | 3.4709 days |
+| ΔV1 | 1.6784 km/s |
+| ΔV2 | 0.1616 km/s |
+| Total ΔV | 1.8400 km/s |
+| Position Error | 0.000137 km |
+
+---
+
+# Generated Outputs
+
+- Pareto Front Figures
+- 3D Transfer Trajectories
+- Radius History Plots
+- Maneuver Magnitude Plots
+- Visibility Analysis Figures
+- Rendezvous Animations
+- CSV Result Tables
 
 ---
 
 # Repository Structure
 
-```text id="ylrj3j"
+```text
 SPACE312_Final_Project/
 │
 ├── SPACE312_Final_Project_Main.m
-├── SPACE312_Final_Project_Report_KR_final.docx
 ├── README.md
 │
+├── functions/
+│
 ├── results/
-│   ├── FinalProject_ReportSolutions.csv
-│   ├── balanced_knee/
 │   ├── pareto_front/
 │   ├── trajectory_figures/
 │   ├── visibility/
-│   └── animations/
-│
-└── functions/
-    ├── Lambert solver
-    ├── Two-body propagator
-    ├── Coordinate transforms
-    ├── Visibility analysis
-    └── Plot utilities
+│   ├── animations/
+│   └── FinalProject_ReportSolutions.csv
 ```
-
----
-
-# Output Figures
-
-The MATLAB workflow automatically generates:
-
-* Pareto front plots
-* 3D transfer trajectory figures
-* Radius history plots
-* Maneuver magnitude plots
-* Final position error plots
-* KHU visibility interval figures
-* Rendezvous animation GIFs
-
-Generated figures and CSV files are stored in the `results/` directory.
 
 ---
 
 # How to Run
 
-Run the main MATLAB script:
-
-```matlab id="kq7m0j"
+```matlab
 SPACE312_Final_Project_Main
 ```
-
-The script will:
-
-* regenerate all transfer candidates
-* perform Pareto filtering
-* print the selected solution
-* export CSV result tables
-* generate plots and animations
-
-The selected design point is saved to:
-
-```text id="0jv8h4"
-results/FinalProject_ReportSolutions.csv
-```
-
----
-
-# Key Project Features
-
-* Moving GEO target rendezvous interpretation
-* Multi-revolution Lambert trajectory search
-* Practical mission-priority-based solution selection
-* Pareto tradeoff analysis
-* Automated MATLAB post-processing
-* ECI/ECEF/SEZ visibility analysis
-* Transfer animation generation
 
 ---
 
 # References
 
-1. Howard D. Curtis, *Orbital Mechanics for Engineering Students*, 4th Edition, Elsevier, 2020.
-
-2. David A. Vallado, *Fundamentals of Astrodynamics and Applications*, 5th Edition, Microcosm Press, 2021.
+1. Howard D. Curtis, Orbital Mechanics for Engineering Students.
+2. David A. Vallado, Fundamentals of Astrodynamics and Applications.
